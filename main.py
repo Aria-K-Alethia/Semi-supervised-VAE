@@ -10,21 +10,26 @@ import torch.distributions as dist
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
+from dataset import get_mnist
+from model import VAE, CVAE, StackedVAE, GMVAE
 
 parser = argparse.ArgumentParser(description='VAE MNIST Example')
-parser.add_argument('--batch-size', type=int, default=128, metavar='N',
-                    help='input batch size for training (default: 128)')
+parser.add_argument('--batch-size', type=int, default=64, metavar='N',
+                    help='input batch size for training (default: 64)')
 parser.add_argument('--epochs', type=int, default=10, metavar='N',
                     help='number of epochs to train (default: 10)')
 parser.add_argument('--no-cuda', action='store_true', default=False,
                     help='enables CUDA training')
-parser.add_argument('--seed', type=int, default=1, metavar='S',
+parser.add_argument('--seed', type=int, default=1024, metavar='S',
                     help='random seed (default: 1)')
 parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                     help='how many batches to wait before logging training status')
 parser.add_argument('--train', action='store_true', default=False)
 parser.add_argument('--output', type=str, default='./model/model.pt')
 parser.add_argument('--label', action='store_true', default=False)
+parser.add_argument('--alpha', type=float, default=1)
+parser.add_argument('-architecture', type=str)
+
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
 
@@ -33,155 +38,31 @@ torch.manual_seed(args.seed)
 device = torch.device("cuda" if args.cuda else "cpu")
 
 kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
-train_loader = torch.utils.data.DataLoader(
-    datasets.MNIST('./data', train=True, download=True,
-                   transform=transforms.ToTensor()),
-    batch_size=args.batch_size, shuffle=True, **kwargs)
-test_loader = torch.utils.data.DataLoader(
-    datasets.MNIST('./data', train=False, transform=transforms.ToTensor()),
-    batch_size=args.batch_size, shuffle=True, **kwargs)
+
+labelled, unlabelled, validation = get_mnist(location="./data", batch_size=args.batch_size, labels_per_class=10)
 
 prev_loss = float('inf')
 
-def onehot(label, number):
-    # label: [#batch_size]
-    # number: label number
-    device = label.device
-    out = torch.arange(number).to(device)
-    out.unsqueeze_(0)
-    batch_size = label.shape[0]
-    out = out.repeat(batch_size, 1)
-    label = label.unsqueeze(1)
-    temp = (out != label)
-    out[out == label] = 1
-    out[temp] = 0
-    return out
-
-class VAE(nn.Module):
-    def __init__(self):
-        super(VAE, self).__init__()
-        self.fc1 = nn.Linear(784, 400)
-        self.fc21 = nn.Linear(400, 20)
-        self.fc22 = nn.Linear(400, 20)
-        self.fc3 = nn.Linear(20, 400)
-        self.fc4 = nn.Linear(400, 784)
-        self.loc = nn.Parameter(torch.zeros(20), requires_grad=False)
-        self.scale = nn.Parameter(torch.ones(20), requires_grad=False)
-        self.prior = dist.Independent(dist.Normal(self.loc, self.scale), 1)
-
-    def encode(self, x):
-        h1 = F.relu(self.fc1(x))
-        return self.fc21(h1), self.fc22(h1)
-
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(logvar)
-        pred_dist = dist.Independent(dist.Normal(mu, std), 1)
-        eps = pred_dist.rsample()
-        kl_loss = dist.kl_divergence(pred_dist, self.prior)
-        return eps, kl_loss
-
-    def decode(self, z):
-        h3 = F.relu(self.fc3(z))
-        return torch.sigmoid(self.fc4(h3))
-
-    def forward(self, x, label):
-        mu, logvar = self.encode(x.view(-1, 784))
-        z, kl_loss = self.reparameterize(mu, logvar)
-        return self.decode(z), mu, logvar, kl_loss
-
-class StackVAE(nn.Module):
-    def __init__(self):
-        super(StackVAE, self).__init__()
-        self.fc1 = nn.Linear(794, 400)
-        self.fc21 = nn.Linear(400, 20)
-        self.fc22 = nn.Linear(400, 20)
-        self.fc3 = nn.Linear(30, 400)
-        self.fc4 = nn.Linear(400, 784)
-        self.loc = nn.Parameter(torch.zeros(20), requires_grad=False)
-        self.scale = nn.Parameter(torch.ones(20), requires_grad=False)
-        self.prior = dist.Independent(dist.Normal(self.loc, self.scale), 1)
-
-    def encode(self, x):
-        h1 = F.relu(self.fc1(x))
-        return self.fc21(h1), self.fc22(h1)
-
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(logvar)
-        pred_dist = dist.Independent(dist.Normal(mu, std), 1)
-        eps = pred_dist.rsample()
-        kl_loss = dist.kl_divergence(pred_dist, self.prior)
-        kl_loss -= torch.log(torch.scalar_tensor(1/10)).to(kl_loss.device).type_as(kl_loss)
-        return eps, kl_loss
-
-    def decode(self, z):
-        h3 = F.relu(self.fc3(z))
-        return torch.sigmoid(self.fc4(h3))
-
-    def forward(self, x, label):
-        label_onehot = onehot(label, 10).type_as(x)
-        mu, logvar = self.encode(torch.cat([x.view(-1, 784), label_onehot], dim=1))
-        z, kl_loss = self.reparameterize(mu, logvar)
-        z = torch.cat([z, label_onehot], dim=1)
-        return self.decode(z), mu, logvar, kl_loss
-
-class GMVAE(nn.Module):
-    def __init__(self):
-        super(GMVAE, self).__init__()
-        self.fc1 = nn.Linear(794, 400)
-        self.fc21 = nn.Linear(400, 20)
-        self.fc22 = nn.Linear(400, 20)
-        self.fc3 = nn.Linear(20, 400)
-        self.fc4 = nn.Linear(400, 784)
-        #self.loc = nn.Parameter(torch.zeros(20), requires_grad=False)
-        #self.scale = nn.Parameter(torch.ones(20), requires_grad=False)
-        #self.prior = dist.Independent(dist.Normal(self.loc, self.scale), 1)
-        self.loc = nn.Linear(10, 20, bias=False)
-        self.scale = nn.Linear(10, 20)
-        self.sp = nn.Softplus()
-
-    def encode(self, x):
-        h1 = F.relu(self.fc1(x))
-        return self.fc21(h1), self.fc22(h1)
-
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(logvar)
-        pred_dist = dist.Independent(dist.Normal(mu, std), 1)
-        eps = pred_dist.rsample()
-        prior_mean = self.loc(self.onehot)
-        prior_std = self.sp(self.scale(self.onehot))
-        self.prior = dist.Independent(dist.Normal(prior_mean, prior_std), 1)
-        kl_loss = dist.kl_divergence(pred_dist, self.prior)
-        kl_loss -= torch.log(torch.scalar_tensor(1/10)).to(kl_loss.device).type_as(kl_loss)
-        return eps, kl_loss
-
-    def decode(self, z):
-        h3 = F.relu(self.fc3(z))
-        return torch.sigmoid(self.fc4(h3))
-
-    def forward(self, x, label):
-        label_onehot = onehot(label, 10).type_as(x)
-        self.onehot = label_onehot
-        mu, logvar = self.encode(torch.cat([x.view(-1, 784), label_onehot], dim=1))
-        z, kl_loss = self.reparameterize(mu, logvar)
-        #z = torch.cat([z, label_onehot], dim=1)
-        return self.decode(z), mu, logvar, kl_loss
-
-
 model = HierVAE2().to(device)
+x = 784
+y = 10
+z = 20
+h = 400
+c = [400, 128]
+if args.architecture == 'vae':
+    model = VAE(x, y, z, h)
+elif args.architecture == 'cvae':
+    model = CVAE(x, y, z, h, c)
+elif args.architecture == 'stackedvae':
+    vae = VAE(x, y, z, h)
+    vae.load_state_dict(torch.load(args.pretrained_vae))
+    model = StackedVAE(x, y, h, c, vae)
+elif args.architecture == 'gmvae':
+    model = GMVAE(x, y, z, h, c)
+else:
+    raise ValueError('Model architecture {} is not defined'.format(args.architecture))
+model = model.to(device)
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
-
-
-# Reconstruction + KL divergence losses summed over all elements and batch
-def loss_function(recon_x, x, mu, logvar, kl_loss):
-    BCE = F.binary_cross_entropy(recon_x, x.view(-1, 784), reduction='sum')
-    # see Appendix B from VAE paper:
-    # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-    # https://arxiv.org/abs/1312.6114
-    # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    KLD = torch.sum(kl_loss)
-    #KLD2 = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    #print(KLD2, KLD)
-    return BCE + KLD, (BCE, KLD)
 
 
 def train(epoch):
@@ -231,7 +112,7 @@ def test(epoch):
                                       recon_batch.view(args.batch_size, 1, 28, 28)[:n]])
                 save_image(comparison.cpu(),
                          'results/reconstruction_' + str(epoch) + '.png', nrow=n)
-            
+
     global prev_loss
     test_loss /= len(test_loader.dataset)
     if test_loss > prev_loss:
@@ -246,7 +127,7 @@ def main_train():
         with torch.no_grad():
             sample = torch.randn(64, 20).to(device)
             if args.label:
-                y = onehot(torch.randint(0, 10, (64,)), 10).to(device).type_as(sample)
+                y = onehot_vector(torch.randint(0, 10, (64,)), 10).to(device).type_as(sample)
                 sample = torch.cat([sample, y], dim=1)
             sample = model.decode(sample).cpu()
             save_image(sample.view(64, 1, 28, 28),
@@ -291,7 +172,7 @@ def analysis():
     with torch.no_grad():
         sample = torch.diag(torch.ones(20)).to(device)
         if args.label:
-            y = onehot(torch.arange(10).repeat(2), 10).to(device).type_as(sample)
+            y = onehot_vector(torch.arange(10).repeat(2), 10).to(device).type_as(sample)
             sample = torch.cat([sample, y], dim=1)
         sample = model.decode(sample).cpu()
         save_image(sample.view(20, 1, 28, 28), './output/sample.png')
@@ -303,7 +184,7 @@ def analysis():
     sample = torch.stack(buf)
     with torch.no_grad():
         if args.label:
-            y = onehot(torch.arange(10), 10).to(device).type_as(sample)
+            y = onehot_vector(torch.arange(10), 10).to(device).type_as(sample)
             sample = torch.cat([sample, y], dim=1)
         sample = model.decode(sample).cpu()
         save_image(sample.view(10, 1, 28, 28), './output/mean.png')
@@ -317,14 +198,14 @@ def analysis():
             sample.append(temp)
         sample = torch.stack(sample)
         if args.label:
-            y = onehot(torch.zeros(60).fill_(4), 10).to(device).type_as(sample)
+            y = onehot_vector(torch.zeros(60).fill_(4), 10).to(device).type_as(sample)
             sample = torch.cat([sample, y], dim=1)
         sample = model.decode(sample).cpu()
         save_image(sample.view(60, 1, 28, 28), './output/traverse.png', nrow=6)
-        
+
 if __name__ == "__main__":
     if args.train:
         main_train()
     else:
         analysis()
-    
+
