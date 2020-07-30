@@ -12,6 +12,8 @@ from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 from dataset import get_mnist
 from model import VAE, CVAE, StackedVAE, GMVAE
+from utils import onehot_vector
+from itertools import cycle
 
 parser = argparse.ArgumentParser(description='VAE MNIST Example')
 parser.add_argument('--batch-size', type=int, default=64, metavar='N',
@@ -28,7 +30,8 @@ parser.add_argument('--train', action='store_true', default=False)
 parser.add_argument('--output', type=str, default='./model/model.pt')
 parser.add_argument('--label', action='store_true', default=False)
 parser.add_argument('--alpha', type=float, default=1)
-parser.add_argument('-architecture', type=str)
+parser.add_argument('--architecture', type=str)
+parser.add_argument('--pretrained-vae', type=str, default='./model/vae.pt')
 
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
@@ -43,49 +46,64 @@ labelled, unlabelled, validation = get_mnist(location="./data", batch_size=args.
 
 prev_loss = float('inf')
 
-model = HierVAE2().to(device)
-x = 784
-y = 10
-z = 20
-h = 400
-c = [400, 128]
+X = 784
+Y = 10
+Z = 20
+H = 400
+C = [400, 128]
 if args.architecture == 'vae':
-    model = VAE(x, y, z, h)
+    model = VAE(X, Y, Z, H)
 elif args.architecture == 'cvae':
-    model = CVAE(x, y, z, h, c)
+    model = CVAE(X, Y, Z, H, C)
 elif args.architecture == 'stackedvae':
-    vae = VAE(x, y, z, h)
+    vae = VAE(X, Y, Z, H)
     vae.load_state_dict(torch.load(args.pretrained_vae))
-    model = StackedVAE(x, y, h, c, vae)
+    model = StackedVAE(X, Y, Z, H, C, vae)
 elif args.architecture == 'gmvae':
-    model = GMVAE(x, y, z, h, c)
+    model = GMVAE(X, Y, Z, H, C)
 else:
     raise ValueError('Model architecture {} is not defined'.format(args.architecture))
 model = model.to(device)
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-
 def train(epoch):
     model.train()
     train_loss = 0
-    for batch_idx, (data, label) in enumerate(train_loader):
-        data = data.to(device)
-        label = label.to(device)
+    print('Train start, labelled: {}, unlablled: {}'.format(len(labelled), len(unlabelled)))
+    if epoch == 1:
+        for x, y in labelled:
+            continue
+        for x, y in unlabelled:
+            continue
+    for batch_idx, ((x, y), (u, _)) in enumerate(zip(cycle(labelled), unlabelled)):
+    #for (x, y), (u, _) in zip(cycle(labelled), unlabelled):
+        x = x.to(device)
+        y = y.to(device)
+        u = u.to(device)
         optimizer.zero_grad()
-        recon_batch, mu, logvar, kl_loss = model(data, label)
-        loss, (BCE, KLD) = loss_function(recon_batch, data, mu, logvar, kl_loss)
+        # labelled data
+        l_recon_batch, L, classification_loss, l_loss_state, l_state = model(x, y)
+        u_recon_batch, U, _, u_loss_state, u_state = model(u)
+        if args.architecture == 'vae':
+            loss = U
+        else:
+            loss = L + U + args.alpha * classification_loss
         loss.backward()
         train_loss += loss.item()
         optimizer.step()
         if batch_idx % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, BCE: {:.6f}, KLD: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader),
-                loss.item() / len(data),
-                BCE.item() / len(data), KLD.item() / len(data)))
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, L_BCE: {:.6f}, L_KLD: {:.6f}, L_CLAS: {:.6f}, U_BCE: {:.6f}, U_KLD: {:.6f}'.format(
+                epoch, batch_idx * len(x), len(unlabelled.dataset),
+                100. * batch_idx / len(unlabelled),
+                loss.item() / len(x),
+                l_loss_state['reconstruction'].item() / len(x),
+                l_loss_state['kl'].item() / len(x),
+                l_loss_state['classification'].item() / len(x),
+                u_loss_state['reconstruction'].item() / len(x),
+                u_loss_state['kl'].item() / len(x)))
 
     print('====> Epoch: {} Average loss: {:.4f}'.format(
-          epoch, train_loss / len(train_loader.dataset)))
+          epoch, train_loss / len(unlabelled.dataset)))
 
 def lr_schedule():
     old_lr = optimizer.param_groups[0]['lr']
@@ -100,38 +118,47 @@ def test(epoch):
     test_loss = 0
     outdata = []
     with torch.no_grad():
-        for i, (data, y) in enumerate(test_loader):
-            data = data.to(device)
+        for i, (x, y) in enumerate(validation):
+            x = x.to(device)
             y = y.to(device)
-            recon_batch, mu, logvar, kl_loss = model(data, y)
-            loss, (BCE, KLD) = loss_function(recon_batch, data, mu, logvar, kl_loss)
-            test_loss += loss.item()
+            recon_batch, loss, classification_loss, loss_state, state = model(x, y)
+            test_loss += loss_state['reconstruction'].item()
             if i == 0:
-                n = min(data.size(0), 8)
-                comparison = torch.cat([data[:n],
-                                      recon_batch.view(args.batch_size, 1, 28, 28)[:n]])
+                n = min(x.shape[0], 8)
+                comparison = torch.cat([x.view(x.shape[0], 1, 28, 28)[:n],
+                                      recon_batch.view(x.shape[0], 1, 28, 28)[:n]])
                 save_image(comparison.cpu(),
-                         'results/reconstruction_' + str(epoch) + '.png', nrow=n)
+                         'results/{}_reconstruction_'.format(args.architecture) + str(epoch) + '.png', nrow=n)
 
     global prev_loss
-    test_loss /= len(test_loader.dataset)
+    test_loss /= len(validation.dataset)
     if test_loss > prev_loss:
         lr_schedule()
     prev_loss = test_loss
     print('====> Test set loss: {:.4f}'.format(test_loss))
 
+def random_sample(epoch):
+    with torch.no_grad():
+            if args.architecture != 'gmvae':
+                sample = torch.randn(64, 20).to(device)
+                y = onehot_vector(torch.randint(0, 10, (64,)), 10).to(device).type_as(sample)
+            else:
+                y = onehot_vector(torch.randint(0, 10, (64,)), 10).to(device).float()
+                loc = model.loc(y)
+                scale = model.sp(model.scale(y))
+                temp_dist = dist.Independent(dist.Normal(loc, scale), 1)
+                sample = temp_dist.rsample()
+            if args.label:
+                sample = torch.cat([sample, y], dim=1)
+            sample = model.decode(sample).cpu()
+            save_image(sample.view(64, 1, 28, 28),
+                       'results/{}_sample_'.format(args.architecture) + str(epoch) + '.png')
+
 def main_train():
     for epoch in range(1, args.epochs + 1):
         train(epoch)
         test(epoch)
-        with torch.no_grad():
-            sample = torch.randn(64, 20).to(device)
-            if args.label:
-                y = onehot_vector(torch.randint(0, 10, (64,)), 10).to(device).type_as(sample)
-                sample = torch.cat([sample, y], dim=1)
-            sample = model.decode(sample).cpu()
-            save_image(sample.view(64, 1, 28, 28),
-                       'results/sample_' + str(epoch) + '.png')
+        random_sample(epoch)
     state_dict = model.state_dict()
     torch.save(state_dict, args.output)
 
@@ -139,20 +166,32 @@ def analysis():
     state_dict = torch.load(args.output)
     model.load_state_dict(state_dict)
     embedding, label = None, None
+    # latent variable visualization and unsupervised accuracy
     plt.figure()
-    tsne = TSNE(2, 10, init='pca')
+    tsne = TSNE(2, 100, init='pca')
     #pca = PCA(n_components=2, whiten=True)
+    correct_count = 0
     with torch.no_grad():
-        for i, (x, y) in enumerate(test_loader):
+        for i, (x, y) in enumerate(validation):
             x = x.to(device)
             y = y.to(device)
-            recon_batch, mu, logvar, kl_loss = model(x, y)
+            recon_batch, _, _, _, state= model(x, y)
+            mu = state['mean']
             if embedding is None:
-                embedding = mu
+                embedding = state['mean']
                 label = y
             else:
                 embedding = torch.cat([embedding, mu], 0)
                 label = torch.cat([label, y], 0)
+            if args.architecture == 'stackedvae':
+                feat = model.vae.sample(x)
+                logits = model.classify(feat)
+            else:
+                logits = model.classify(x)
+            temp = torch.argmax(logits, dim=-1)
+            correct_count += (torch.argmax(logits, dim=-1).squeeze() == y).sum().item()
+    accuracy = correct_count / len(validation.dataset)
+    print('Unsupervised accuracy: {:.2f}%'.format(accuracy * 100))
     embedding2 = embedding.cpu().numpy()
     label = label.cpu().numpy()
     label = label[:10000]
@@ -169,6 +208,7 @@ def analysis():
     f = plt.gcf()
     f.savefig('./output/latent_variable.png')
     plt.clf()
+    '''
     with torch.no_grad():
         sample = torch.diag(torch.ones(20)).to(device)
         if args.label:
@@ -188,20 +228,21 @@ def analysis():
             sample = torch.cat([sample, y], dim=1)
         sample = model.decode(sample).cpu()
         save_image(sample.view(10, 1, 28, 28), './output/mean.png')
-    base_sample = torch.zeros(20).to(device)
-    buf = [-2, 0, 2]
+    '''
+    base_sample = torch.zeros(Z).to(device)
+    buf = [-2, -1, 0, 1, 2]
     sample = []
     with torch.no_grad():
-        for i in range(60):
+        for i in range(Z * len(buf)):
             temp = base_sample.clone()
-            temp[i//3] = buf[i%3]
+            temp[i//len(buf)] = buf[i%len(buf)]
             sample.append(temp)
         sample = torch.stack(sample)
         if args.label:
-            y = onehot_vector(torch.zeros(60).fill_(4), 10).to(device).type_as(sample)
+            y = onehot_vector(torch.cat([torch.ones(Z * len(buf) // Y) * i for i in range(Y)]), Y).to(device).type_as(sample)
             sample = torch.cat([sample, y], dim=1)
         sample = model.decode(sample).cpu()
-        save_image(sample.view(60, 1, 28, 28), './output/traverse.png', nrow=6)
+        save_image(sample.view(Z * len(buf), 1, 28, 28), './output/traverse.png', nrow=len(buf))
 
 if __name__ == "__main__":
     if args.train:

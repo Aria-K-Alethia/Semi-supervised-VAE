@@ -10,13 +10,14 @@ import torchvision.transforms as transforms
 from utils import onehot
 
 def get_mnist(location="./", batch_size=64, labels_per_class=100):
-
+    n_labels = 10
+    cuda = torch.cuda.is_available()
     flatten_bernoulli = lambda x: transforms.ToTensor()(x).view(-1).bernoulli()
 
     mnist_train = MNIST(location, train=True, download=True,
-                        transform=flatten_bernoulli, target_transform=onehot(n_labels))
+                        transform=flatten_bernoulli)
     mnist_valid = MNIST(location, train=False, download=True,
-                        transform=flatten_bernoulli, target_transform=onehot(n_labels))
+                        transform=flatten_bernoulli)
 
     def get_sampler(labels, n=None):
         # Only choose digits in n_labels
@@ -29,13 +30,12 @@ def get_mnist(location="./", batch_size=64, labels_per_class=100):
         indices = torch.from_numpy(indices)
         sampler = SubsetRandomSampler(indices)
         return sampler
-
     # Dataloaders for MNIST
-    labelled = torch.utils.data.DataLoader(mnist_train, batch_size=batch_size, num_workers=2, pin_memory=cuda,
+    worker = 1
+    labelled = torch.utils.data.DataLoader(mnist_train, batch_size=batch_size, num_workers=worker, pin_memory=cuda,
                                            sampler=get_sampler(mnist_train.train_labels.numpy(), labels_per_class))
-    unlabelled = torch.utils.data.DataLoader(mnist_train, batch_size=batch_size, num_workers=2, pin_memory=cuda,
+    unlabelled = torch.utils.data.DataLoader(mnist_train, batch_size=batch_size, num_workers=worker, pin_memory=cuda,
                                              sampler=get_sampler(mnist_train.train_labels.numpy()))
-    validation = torch.utils.data.DataLoader(mnist_valid, batch_size=batch_size, num_workers=2, pin_memory=cuda,
+    validation = torch.utils.data.DataLoader(mnist_valid, batch_size=batch_size, num_workers=worker, pin_memory=cuda,
                                              sampler=get_sampler(mnist_valid.test_labels.numpy()))
-
     return labelled, unlabelled, validation
