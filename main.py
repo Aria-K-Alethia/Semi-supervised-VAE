@@ -32,6 +32,7 @@ parser.add_argument('--label', action='store_true', default=False)
 parser.add_argument('--alpha', type=float, default=1)
 parser.add_argument('--architecture', type=str)
 parser.add_argument('--pretrained-vae', type=str, default='./model/vae.pt')
+parser.add_argument('--labels-per-class', type=int)
 
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
@@ -42,7 +43,7 @@ device = torch.device("cuda" if args.cuda else "cpu")
 
 kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
 
-labelled, unlabelled, validation = get_mnist(location="./data", batch_size=args.batch_size, labels_per_class=10)
+labelled, unlabelled, validation = get_mnist(location="./data", batch_size=args.batch_size, labels_per_class=args.labels_per_class)
 
 prev_loss = float('inf')
 
@@ -168,8 +169,8 @@ def analysis():
     embedding, label = None, None
     # latent variable visualization and unsupervised accuracy
     plt.figure()
-    tsne = TSNE(2, 100, init='pca')
-    #pca = PCA(n_components=2, whiten=True)
+    tsne = TSNE(2, 50, init='pca')
+    #tsne = PCA(n_components=2, whiten=True)
     correct_count = 0
     with torch.no_grad():
         for i, (x, y) in enumerate(validation):
@@ -206,7 +207,7 @@ def analysis():
         plt.scatter(d[:, 0], d[:, 1], label=str(i))
     plt.legend(loc='upper right')
     f = plt.gcf()
-    f.savefig('./output/latent_variable.png')
+    f.savefig('./output/{}_{}_latent_variable.png'.format(args.architecture, args.labels_per_class))
     plt.clf()
     '''
     with torch.no_grad():
@@ -229,20 +230,31 @@ def analysis():
         sample = model.decode(sample).cpu()
         save_image(sample.view(10, 1, 28, 28), './output/mean.png')
     '''
-    base_sample = torch.zeros(Z).to(device)
-    buf = [-2, -1, 0, 1, 2]
-    sample = []
-    with torch.no_grad():
-        for i in range(Z * len(buf)):
-            temp = base_sample.clone()
-            temp[i//len(buf)] = buf[i%len(buf)]
-            sample.append(temp)
-        sample = torch.stack(sample)
-        if args.label:
-            y = onehot_vector(torch.cat([torch.ones(Z * len(buf) // Y) * i for i in range(Y)]), Y).to(device).type_as(sample)
-            sample = torch.cat([sample, y], dim=1)
-        sample = model.decode(sample).cpu()
-        save_image(sample.view(Z * len(buf), 1, 28, 28), './output/traverse.png', nrow=len(buf))
+    buf = [-3, -1.5, 0, 1.5, 3]
+    if args.architecture != 'gmvae':
+        base_sample = torch.zeros(Z).to(device)
+        sample = []
+        with torch.no_grad():
+            for i in range(Z * len(buf)):
+                temp = base_sample.clone()
+                temp[i//len(buf)] = buf[i%len(buf)]
+                sample.append(temp)
+            sample = torch.stack(sample)
+            if args.label:
+                y = onehot_vector(torch.cat([torch.ones(Z * len(buf) // Y) * i for i in range(Y)]), Y).to(device).type_as(sample)
+                sample = torch.cat([sample, y], dim=1)
+            sample = model.decode(sample).cpu()
+    else:
+        y = onehot_vector(torch.cat([torch.ones(Z * len(buf) // Y) * i for i in range(Y)]), Y).to(device).float()
+        mean = model.loc(y)
+        scale = model.scale(y)
+        for i in range(y.shape[0]):
+            dim = i // len(buf)
+            index = i % len(buf)
+            mean[i, dim] = mean[i, dim] + buf[index] * scale[i, dim]
+        sample = torch.cat([mean, y], dim=1)
+        sample=  model.decode(sample).cpu()
+    save_image(sample.view(Z * len(buf), 1, 28, 28), './output/{}_traverse.png'.format(args.architecture), nrow=2 * len(buf))
 
 if __name__ == "__main__":
     if args.train:
