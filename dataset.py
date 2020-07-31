@@ -1,3 +1,14 @@
+'''
+    Copyright (c) 2020 Aria-K-Alethia@github.com
+
+    Description:
+        mnist dataset
+    Licence:
+        MIT
+    THE USER OF THIS CODE AGREES TO ASSUME ALL LIABILITY FOR THE USE OF THIS CODE.
+    Any use of this code should display all the info above.
+'''
+
 import numpy as np
 import torch
 import torch.nn as nn

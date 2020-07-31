@@ -1,3 +1,13 @@
+'''
+    Copyright (c) 2020 Aria-K-Alethia@github.com
+
+    Description:
+        train and exp code
+    Licence:
+        MIT
+    THE USER OF THIS CODE AGREES TO ASSUME ALL LIABILITY FOR THE USE OF THIS CODE.
+    Any use of this code should display all the info above.
+'''
 from __future__ import print_function
 import argparse
 import torch

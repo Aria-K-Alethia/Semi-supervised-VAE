@@ -1,3 +1,13 @@
+'''
+    Copyright (c) 2020 Aria-K-Alethia@github.com
+
+    Description:
+        model definition
+    Licence:
+        MIT
+    THE USER OF THIS CODE AGREES TO ASSUME ALL LIABILITY FOR THE USE OF THIS CODE.
+    Any use of this code should display all the info above.
+'''
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
